@@ -1,8 +1,22 @@
+import openai
+import firebase_admin
+from firebase_admin import credentials, storage, firestore
 from fastapi import FastAPI, UploadFile, File, Form
 from pydantic import BaseModel
 from io import BytesIO
-import textract  # To extract text from PDFs
-import re
+import textract
+import os
+import uuid
+
+# Firebase Admin Setup
+cred = credentials.Certificate("path/to/your/firebase-credentials.json")
+firebase_admin.initialize_app(cred, {"storageBucket": "your-project-id.appspot.com"})
+
+# Initialize Firestore
+db = firestore.client()
+
+# OpenAI API Key
+openai.api_key = 'your-openai-api-key'
 
 app = FastAPI()
 
@@ -20,20 +34,41 @@ def extract_text_from_pdf(file: BytesIO) -> str:
     except Exception as e:
         return str(e)
 
-# Function to analyze resume text (simplified version)
-def analyze_resume(resume_text: str, job_description: str) -> Report:
-    # Simple keyword match analysis (you can expand this logic)
-    resume_keywords = set(re.findall(r'\w+', resume_text.lower()))
-    job_keywords = set(re.findall(r'\w+', job_description.lower()))
+# Function to analyze resume text using OpenAI API
+def analyze_with_openai(resume_text: str, job_description: str) -> Report:
+    prompt = f"""
+    I want you to analyze the following resume and compare it to the given job description. 
+    Provide a clarity score, list grammar issues, and give keyword match between the job description and the resume.
+    
+    Resume: {resume_text}
 
-    common_keywords = resume_keywords.intersection(job_keywords)
-    keyword_match = f"{len(common_keywords)} / {len(job_keywords)}"
+    Job Description: {job_description}
     
-    # Placeholder for more sophisticated analysis
-    clarity = "8/10"
-    grammar_issues = ["Fix passive voice in Experience section", "Clarify skills section"]
-    suggestions = ["Use more action verbs", "Include specific metrics", "Optimize format for ATS"]
+    Please return the following information:
+    - A clarity score (out of 10)
+    - Grammar issues (list any that need fixing)
+    - Keyword match (list the percentage match of keywords between the resume and the job description)
+    - Suggestions to improve the resume for ATS optimization
+    """
     
+    # Requesting OpenAI to process the resume and job description
+    response = openai.Completion.create(
+        engine="text-davinci-003",  # You can also use "gpt-3.5-turbo" or other available engines
+        prompt=prompt,
+        max_tokens=500,
+        n=1,
+        stop=None,
+        temperature=0.7
+    )
+
+    # Parse the OpenAI response
+    openai_response = response.choices[0].text.strip().split("\n")
+    
+    clarity = openai_response[0].split(":")[1].strip()
+    grammar_issues = [issue.strip() for issue in openai_response[1].split(":")[1].split(",")]
+    keyword_match = openai_response[2].split(":")[1].strip()
+    suggestions = [suggestion.strip() for suggestion in openai_response[3].split(":")[1].split(",")]
+
     return Report(
         clarity=clarity,
         grammarIssues=grammar_issues,
@@ -41,16 +76,48 @@ def analyze_resume(resume_text: str, job_description: str) -> Report:
         suggestions=suggestions
     )
 
+# Function to upload file to Firebase Storage
+def upload_file_to_firebase(file: BytesIO, filename: str) -> str:
+    bucket = storage.bucket()
+    blob = bucket.blob(f"resumes/{filename}")
+    blob.upload_from_file(file, content_type="application/pdf")
+    blob.make_public()
+    return blob.public_url
+
+# Function to store the analysis result in Firestore
+def store_analysis_in_firestore(report: Report, resume_url: str, job_description: str) -> str:
+    doc_ref = db.collection("resume_analysis").document()
+    analysis_data = {
+        "clarity": report.clarity,
+        "grammarIssues": report.grammarIssues,
+        "keywordMatch": report.keywordMatch,
+        "suggestions": report.suggestions,
+        "resumeUrl": resume_url,
+        "jobDescription": job_description,
+    }
+    doc_ref.set(analysis_data)
+    return doc_ref.id
+
 @app.post("/analyze/")
 async def analyze_resume_endpoint(
     resume: UploadFile = File(...),
     job_description: str = Form(...),
 ):
+    # Generate a unique filename for the resume
+    filename = f"{uuid.uuid4()}.pdf"  # You can adjust the format based on the file type
+    
     # Extract text from the uploaded resume
     resume_text = extract_text_from_pdf(await resume.read())
     
-    # Analyze the resume against the job description
-    report = analyze_resume(resume_text, job_description)
+    # Upload resume to Firebase Storage
+    resume_url = upload_file_to_firebase(await resume.read(), filename)
     
-    return report
-
+    # Analyze the resume against the job description using OpenAI
+    report = analyze_with_openai(resume_text, job_description)
+    
+    # Store the analysis in Firestore
+    firestore_id = store_analysis_in_firestore(report, resume_url, job_description)
+    
+    return {"message": "Analysis complete", "reportId": firestore_id}
+ 
+  
