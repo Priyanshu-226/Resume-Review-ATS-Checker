@@ -1,0 +1,56 @@
+from fastapi import FastAPI, UploadFile, File, Form
+from pydantic import BaseModel
+from io import BytesIO
+import textract  # To extract text from PDFs
+import re
+
+app = FastAPI()
+
+class Report(BaseModel):
+    clarity: str
+    grammarIssues: list
+    keywordMatch: str
+    suggestions: list
+
+# Function to extract text from a PDF file
+def extract_text_from_pdf(file: BytesIO) -> str:
+    try:
+        text = textract.process(file)
+        return text.decode("utf-8")
+    except Exception as e:
+        return str(e)
+
+# Function to analyze resume text (simplified version)
+def analyze_resume(resume_text: str, job_description: str) -> Report:
+    # Simple keyword match analysis (you can expand this logic)
+    resume_keywords = set(re.findall(r'\w+', resume_text.lower()))
+    job_keywords = set(re.findall(r'\w+', job_description.lower()))
+
+    common_keywords = resume_keywords.intersection(job_keywords)
+    keyword_match = f"{len(common_keywords)} / {len(job_keywords)}"
+    
+    # Placeholder for more sophisticated analysis
+    clarity = "8/10"
+    grammar_issues = ["Fix passive voice in Experience section", "Clarify skills section"]
+    suggestions = ["Use more action verbs", "Include specific metrics", "Optimize format for ATS"]
+    
+    return Report(
+        clarity=clarity,
+        grammarIssues=grammar_issues,
+        keywordMatch=keyword_match,
+        suggestions=suggestions
+    )
+
+@app.post("/analyze/")
+async def analyze_resume_endpoint(
+    resume: UploadFile = File(...),
+    job_description: str = Form(...),
+):
+    # Extract text from the uploaded resume
+    resume_text = extract_text_from_pdf(await resume.read())
+    
+    # Analyze the resume against the job description
+    report = analyze_resume(resume_text, job_description)
+    
+    return report
+
